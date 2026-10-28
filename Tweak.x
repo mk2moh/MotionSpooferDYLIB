@@ -282,7 +282,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
         UISlider *sl=self->_sliders[key]; if(!sl) return;
         if(sl.minimumValue>v) sl.minimumValue=v-1; if(sl.maximumValue<v) sl.maximumValue=v+1;
         sl.value=v; ((UILabel*)self->_valueLabels[key]).text=[NSString stringWithFormat:@"%.2f",v];
-        if([key length]>1 && [[sensorKeys() containsObject:[key substringToIndex:key.length-1]] || [key hasSuffix:@"X"]||[key hasSuffix:@"Y"]||[key hasSuffix:@"Z"]){
+        if([key length]>1 && ([sensorKeys() containsObject:[key substringToIndex:key.length-1]] || [key hasSuffix:@"X"]||[key hasSuffix:@"Y"]||[key hasSuffix:@"Z"])){
             NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); for(int si=0;si<S_COUNT;si++) for(int p=0;p<3;p++) if([[keys[si] stringByAppendingString:ax[p]] isEqualToString:key]){ gAxis[si][p]=v; return; }
         }
         [self setCur:v key:key];
@@ -406,7 +406,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     for(int i=0;i<S_COUNT;i++){ NSString *k=sensorKeys()[i]; UIView *hdr=_sensorHeaders[k]; if(!hdr) continue;
         for(UIView *v in hdr.subviews) for(UIView *sv in v.subviews) if([sv isKindOfClass:[UISwitch class]]) ((UISwitch*)sv).on=gSensorEnabled[i];
         // update abs/adv visibility
-        _absRows[k].hidden=gSensorAdv[i]; _advContainers[k].hidden=!gSensorAdv[i];
+        ((UIView*)_absRows[k]).hidden=gSensorAdv[i]; ((UIView*)_advContainers[k]).hidden=!gSensorAdv[i];
     }
 }
 - (void)updateLive{
