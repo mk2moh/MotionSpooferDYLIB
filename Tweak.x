@@ -323,7 +323,7 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
     for(NSString *k in _sliders.allKeys){ float v=[self cur:k]; // per-axis needs direct
         // per-axis keys not in cur's switch, fetch from gAxis
         NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
-        for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ v=(float)gAxis[si][a]; found=YES; }
+        for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]) v=(float)gAxis[si][a];
         UISlider *sl=(UISlider *)_sliders[k]; sl.value=v; ((UILabel *)_valueLabels[k]).text=[NSString stringWithFormat:@"%.2f",v];
     }
 }
