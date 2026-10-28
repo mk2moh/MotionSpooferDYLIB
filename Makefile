@@ -7,8 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = MotionSpoofer
 MotionSpoofer_FILES = Tweak.x
 MotionSpoofer_FRAMEWORKS = UIKit CoreMotion Foundation
-MotionSpoofer_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-error=deprecated-declarations
--Wno-unused-but-set-variable -Wno-unused-variable
+MotionSpoofer_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-error=deprecated-declarations -Wno-unused-but-set-variable -Wno-unused-variable
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/aggregate.mk
