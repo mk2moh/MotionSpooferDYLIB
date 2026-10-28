@@ -3,7 +3,7 @@
 #import <UIKit/UIKit.h>
 
 #define PREF_DOMAIN @"com.yourname.motionspoofer"
-#define PREF_CHANGED @"com.yourname.motionspoofer/prefsChanged"
+#define PREF_CHANGED "com.yourname.motionspoofer/prefsChanged"
 
 enum { S_ACCEL, S_GYRO, S_MAG, S_USERACCEL, S_GRAVITY, S_ROTRATE, S_MAGCAL, S_ATT, S_COUNT };
 
@@ -104,7 +104,11 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
             if(key) return [[UIWindow alloc] initWithWindowScene:ws];
         }
     }
-    UIWindow *w=[UIApplication sharedApplication].keyWindow;
+    UIWindow *w=nil;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    w=[UIApplication sharedApplication].keyWindow;
+    #pragma clang diagnostic pop
     if(w) return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 }
@@ -233,9 +237,9 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
     else if([k isEqualToString:@"magCal"]) gBase[S_MAGCAL]=v; else if([k isEqualToString:@"attitude"]) gBase[S_ATT]=v;
     else if([k isEqualToString:@"steps"]) mSteps=v; else if([k isEqualToString:@"distance"]) mDistance=v; else if([k isEqualToString:@"pressure"]) mPressure=v; else if([k isEqualToString:@"relAlt"]) mRelAlt=v;
 }
-- (void)changed:(UISlider*)s{ NSString *k=s.accessibilityIdentifier; _valueLabels[k].text=[NSString stringWithFormat:@"%.2f",s.value]; [self setCur:s.value key:k]; }
+- (void)changed:(UISlider*)s{ NSString *k=s.accessibilityIdentifier; ((UILabel *)_valueLabels[k]).text=[NSString stringWithFormat:@"%.2f",s.value]; [self setCur:s.value key:k]; }
 - (void)axisChanged:(UISlider*)s{
-    NSString *k=s.accessibilityIdentifier; _valueLabels[k].text=[NSString stringWithFormat:@"%.2f",s.value];
+    NSString *k=s.accessibilityIdentifier; ((UILabel *)_valueLabels[k]).text=[NSString stringWithFormat:@"%.2f",s.value];
     NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
     for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ gAxis[si][a]=s.value; return; }
 }
@@ -310,7 +314,7 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
 - (void)advToggled:(UISwitch*)s{ gAdv=s.isOn; _advContainer.hidden=!s.isOn; }
 - (void)saveTap{ savePrefs(); UIImpactFeedbackGenerator *g=[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [g impactOccurred]; [self togglePanel]; }
 - (void)resetTap{
-    for(NSString *k in _sliders.allKeys){ UISlider *sl=_sliders[k]; sl.value=1.0; _valueLabels[k].text=@"1.00"; if([k containsString:@"X"]||[k containsString:@"Y"]||[k containsString:@"Z"]||[k isEqualToString:@"Roll"]||[k isEqualToString:@"Pitch"]||[k isEqualToString:@"Yaw"]) { /* per-axis handled via axisChanged path */ NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]) gAxis[si][a]=1; } else [self setCur:1 key:k]; }
+    for(NSString *k in _sliders.allKeys){ UISlider *sl=(UISlider *)_sliders[k]; sl.value=1.0; ((UILabel *)_valueLabels[k]).text=@"1.00"; if([k containsString:@"X"]||[k containsString:@"Y"]||[k containsString:@"Z"]||[k isEqualToString:@"Roll"]||[k isEqualToString:@"Pitch"]||[k isEqualToString:@"Yaw"]) { /* per-axis handled via axisChanged path */ NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]) gAxis[si][a]=1; } else [self setCur:1 key:k]; }
     gEnabled=YES; gAdv=NO; _enabledSwitch.on=YES; _advSwitch.on=NO; _advContainer.hidden=YES;
 }
 - (void)hideFloat{ _floatBtn.hidden=YES; _panelBG.hidden=YES; }
@@ -320,7 +324,7 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
         // per-axis keys not in cur's switch, fetch from gAxis
         NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); BOOL found=NO;
         for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ v=(float)gAxis[si][a]; found=YES; }
-        UISlider *sl=_sliders[k]; sl.value=v; _valueLabels[k].text=[NSString stringWithFormat:@"%.2f",v];
+        UISlider *sl=(UISlider *)_sliders[k]; sl.value=v; ((UILabel *)_valueLabels[k]).text=[NSString stringWithFormat:@"%.2f",v];
     }
 }
 @end
