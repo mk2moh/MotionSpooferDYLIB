@@ -133,7 +133,8 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 @end
 
 @implementation MSMotionOverlay {
-    UIWindow *_overlayWindow; MSPassThroughView *_rootView;
+    UIWindow *_floatWindow; UIWindow *_panelWindow;
+    MSPassThroughView *_rootView; MSPassThroughView *_panelRootView;
     UIButton *_floatBtn; UIView *_panelBG; UIView *_card; UIScrollView *_scroll; UIStackView *_stack;
     NSMutableDictionary *_sliders; NSMutableDictionary *_valueLabels; NSMutableDictionary *_liveLabels;
     NSMutableDictionary *_sensorHeaders; NSMutableDictionary *_absRows; NSMutableDictionary *_advContainers;
@@ -141,7 +142,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     CGPoint _panStart;
 }
 + (instancetype)shared{ static MSMotionOverlay *s; static dispatch_once_t t; dispatch_once(&t,^{s=[MSMotionOverlay new];}); return s; }
-- (void)installIfNeeded{ if(_overlayWindow) return; dispatch_async(dispatch_get_main_queue(),^{ [self createWindow]; }); }
+- (void)installIfNeeded{ if(_floatWindow) return; dispatch_async(dispatch_get_main_queue(),^{ [self createWindow]; }); }
 - (UIWindow*)findWindowScene{
     for(UIScene *sec in [UIApplication sharedApplication].connectedScenes){
         if([sec isKindOfClass:[UIWindowScene class]]){
@@ -160,16 +161,26 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 }
 - (void)createWindow{
-    _overlayWindow=[self findWindowScene];
-    _overlayWindow.windowLevel=UIWindowLevelAlert+100;
-    _overlayWindow.backgroundColor=[UIColor clearColor]; _overlayWindow.hidden=NO;
-    UIViewController *vc=[UIViewController new]; vc.view.backgroundColor=[UIColor clearColor];
-    _rootView=[MSPassThroughView new]; _rootView.frame=vc.view.bounds; _rootView.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight; _rootView.backgroundColor=[UIColor clearColor];
-    vc.view=_rootView;
-    _overlayWindow.rootViewController=vc; [_overlayWindow makeKeyAndVisible];
+    UIWindow *sceneWin=[self findWindowScene];
+    UIWindowScene *scene = (UIWindowScene*)sceneWin.windowScene;
+    CGRect floatFrame=CGRectMake(20,90,gBtnSize,gBtnSize);
+    // Float window - tiny, only button area, never blocks app
+    if(scene){
+        _floatWindow=[[UIWindow alloc] initWithWindowScene:scene];
+        _panelWindow=[[UIWindow alloc] initWithWindowScene:scene];
+    } else {
+        _floatWindow=[[UIWindow alloc] initWithFrame:floatFrame];
+        _panelWindow=[[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    }
+    _floatWindow.frame=floatFrame; _floatWindow.windowLevel=UIWindowLevelAlert+100;
+    _floatWindow.backgroundColor=[UIColor clearColor]; _floatWindow.hidden=NO; _floatWindow.userInteractionEnabled=YES;
+    UIViewController *vc1=[UIViewController new]; vc1.view.backgroundColor=[UIColor clearColor];
+    _rootView=[MSPassThroughView new]; _rootView.frame=CGRectMake(0,0,floatFrame.size.width,floatFrame.size.height); _rootView.backgroundColor=[UIColor clearColor];
+    vc1.view=_rootView;
+    _floatWindow.rootViewController=vc1; [_floatWindow makeKeyAndVisible];
 
     _floatBtn=[UIButton buttonWithType:UIButtonTypeCustom];
-    _floatBtn.frame=CGRectMake(20,90,gBtnSize,gBtnSize); _floatBtn.layer.cornerRadius=gBtnSize/2;
+    _floatBtn.frame=CGRectMake(0,0,gBtnSize,gBtnSize); _floatBtn.layer.cornerRadius=gBtnSize/2;
     _floatBtn.backgroundColor=[UIColor colorWithRed:0.12 green:0.65 blue:0.95 alpha:gBtnOpacity];
     _floatBtn.layer.shadowColor=[UIColor blackColor].CGColor; _floatBtn.layer.shadowOpacity=0.3; _floatBtn.layer.shadowRadius=6; _floatBtn.layer.shadowOffset=CGSizeMake(0,3);
     [_floatBtn setTitle:@"MS" forState:UIControlStateNormal]; _floatBtn.titleLabel.font=[UIFont boldSystemFontOfSize:15];
@@ -178,12 +189,19 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     [_floatBtn addGestureRecognizer:pan];
     [_rootView addSubview:_floatBtn];
 
-    _panelBG=[[UIView alloc] initWithFrame:_rootView.bounds];
+    // Panel window - full screen but hidden until opened
+    _panelWindow.windowLevel=UIWindowLevelAlert+101; _panelWindow.backgroundColor=[UIColor clearColor]; _panelWindow.hidden=YES;
+    UIViewController *vc2=[UIViewController new]; vc2.view.backgroundColor=[UIColor clearColor];
+    _panelRootView=[MSPassThroughView new]; _panelRootView.frame=[UIScreen mainScreen].bounds; _panelRootView.backgroundColor=[UIColor clearColor];
+    vc2.view=_panelRootView;
+    _panelWindow.rootViewController=vc2;
+
+    _panelBG=[[UIView alloc] initWithFrame:_panelRootView.bounds];
     _panelBG.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-    _panelBG.backgroundColor=[UIColor colorWithWhite:0 alpha:0.48]; _panelBG.hidden=YES;
+    _panelBG.backgroundColor=[UIColor colorWithWhite:0 alpha:0.48]; _panelBG.hidden=NO;
     UITapGestureRecognizer *tapBG=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)];
     [_panelBG addGestureRecognizer:tapBG];
-    [_rootView addSubview:_panelBG];
+    [_panelRootView addSubview:_panelBG];
 
     _card=[[UIView alloc] init]; _card.backgroundColor=[UIColor systemBackgroundColor]; _card.layer.cornerRadius=18; _card.layer.masksToBounds=YES; _card.translatesAutoresizingMaskIntoConstraints=NO;
     [_panelBG addSubview:_card];
@@ -216,15 +234,15 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     _liveTimer=[NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(updateLive) userInfo:nil repeats:YES];
 }
 - (void)handlePan:(UIPanGestureRecognizer*)p{
-    UIView *v=p.view; CGPoint t=[p translationInView:v.superview];
-    if(p.state==UIGestureRecognizerStateBegan) _panStart=v.center;
-    v.center=CGPointMake(_panStart.x+t.x,_panStart.y+t.y);
+    CGPoint t=[p translationInView:_floatWindow];
+    if(p.state==UIGestureRecognizerStateBegan) _panStart=_floatWindow.center;
+    _floatWindow.center=CGPointMake(_panStart.x+t.x,_panStart.y+t.y);
     if(p.state==UIGestureRecognizerStateEnded){
-        CGFloat mid=CGRectGetMidX(v.superview.bounds); CGFloat tx= v.center.x < mid ? 36 : v.superview.bounds.size.width-36;
-        [UIView animateWithDuration:0.25 animations:^{ v.center=CGPointMake(tx, v.center.y); }];
+        CGFloat mid=CGRectGetMidX([UIScreen mainScreen].bounds); CGFloat tx= _floatWindow.center.x < mid ? 36 : [UIScreen mainScreen].bounds.size.width-36;
+        [UIView animateWithDuration:0.25 animations:^{ self->_floatWindow.center=CGPointMake(tx, self->_floatWindow.center.y); }];
     }
 }
-- (void)togglePanel{ BOOL s=_panelBG.hidden; if(s) [self refreshUI]; _panelBG.hidden=!s; _floatBtn.alpha=s?0.3:1.0; }
+- (void)togglePanel{ BOOL show=_panelWindow.hidden; if(show){ [self refreshUI]; _panelWindow.hidden=NO; [_panelWindow makeKeyAndVisible]; } else { _panelWindow.hidden=YES; [_floatWindow makeKeyAndVisible]; } _floatBtn.alpha=show?0.3:1.0; }
 - (UILabel*)section:(NSString*)t{ UILabel *l=[UILabel new]; l.text=t; l.font=[UIFont boldSystemFontOfSize:11]; l.textColor=[UIColor secondaryLabelColor]; l.numberOfLines=0; return l; }
 - (UIView*)rowForKey:(NSString*)key label:(NSString*)lab min:(float)mn max:(float)mx{
     UIView *row=[UIView new];
@@ -393,7 +411,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     }
     gEnabled=YES; _enabledSwitch.on=YES; savePrefs();
 }
-- (void)hideFloat{ _floatBtn.hidden=YES; _panelBG.hidden=YES; }
+- (void)hideFloat{ _floatWindow.hidden=YES; _panelWindow.hidden=YES; }
 - (void)refreshUI{
     _enabledSwitch.on=gEnabled;
     for(NSString *k in _sliders.allKeys){
@@ -410,7 +428,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     }
 }
 - (void)updateLive{
-    if(_panelBG.hidden) return;
+    if(_panelWindow.hidden) return;
     // accel/gyro live
     for(int i=0;i<S_COUNT;i++){
         NSString *k=sensorKeys()[i]; UILabel *live=(UILabel*)_liveLabels[k]; if(!live) continue;
