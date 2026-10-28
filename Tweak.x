@@ -1,6 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <CoreMotion/CoreMotion.h>
+#import <CoreLocation/CoreLocation.h>
+#import <HealthKit/HealthKit.h>
 #import <UIKit/UIKit.h>
+#import <math.h>
 
 #define PREF_DOMAIN @"com.yourname.motionspoofer"
 #define PREF_CHANGED "com.yourname.motionspoofer/prefsChanged"
@@ -21,6 +24,52 @@ static inline double M(int s, int a){ return gSensorAdv[s] ? gAxis[s][a] : gBase
 static NSArray *sensorKeys(){ return @[@"accel",@"gyro",@"mag",@"userAccel",@"gravity",@"rotRate",@"magCal",@"attitude"]; }
 static NSArray *sensorLabels(){ return @[@"Accelerometer",@"Gyroscope",@"Magnetometer",@"User Acceleration",@"Gravity",@"Rotation Rate",@"Calibrated Mag",@"Attitude"]; }
 static NSArray *axisLetters(){ return @[@"X",@"Y",@"Z"]; }
+
+// HealthKit exposes steps through HKQuantitySample and HKStatistics, not CMPedometerData.
+// Scale only the quantities returned by HealthKit getters; the stored Health database is untouched.
+static HKQuantity *MSSpoofHealthQuantity(HKQuantity *quantity, HKQuantityType *type){
+    if(!quantity || !type || !gEnabled) return quantity;
+    NSString *identifier=type.identifier;
+    HKUnit *unit=nil;
+    double multiplier=1.0;
+    if([identifier isEqualToString:HKQuantityTypeIdentifierStepCount]){
+        if(!gExtraEnabled[E_STEPS]) return quantity;
+        unit=[HKUnit countUnit]; multiplier=mSteps;
+    } else if([identifier isEqualToString:HKQuantityTypeIdentifierDistanceWalkingRunning]){
+        if(!gExtraEnabled[E_DISTANCE]) return quantity;
+        unit=[HKUnit meterUnit]; multiplier=mDistance;
+    } else {
+        return quantity;
+    }
+    if(!isfinite(multiplier)) return quantity;
+    double raw=[quantity doubleValueForUnit:unit];
+    double scaled=raw*multiplier;
+    if(!isfinite(raw) || !isfinite(scaled)) return quantity;
+    return [HKQuantity quantityWithUnit:unit doubleValue:scaled];
+}
+
+// CLHeading's component getters are used below to keep compass heading consistent with
+// the magnetometer's per-axis scale. Bypass the hooked getters while reading raw components.
+static __thread BOOL gMSRawCompassAxes=NO;
+static double MSSpoofCompassHeading(CLHeading *heading, double originalHeading){
+    if(!heading || !gEnabled || !gSensorEnabled[S_MAG] || originalHeading<0) return originalHeading;
+    double rawX=0, rawY=0;
+    gMSRawCompassAxes=YES;
+    @try {
+        rawX=heading.x;
+        rawY=heading.y;
+    } @finally {
+        gMSRawCompassAxes=NO;
+    }
+    if(!isfinite(rawX) || !isfinite(rawY) || hypot(rawX,rawY)<1e-9) return originalHeading;
+    double mx=M(S_MAG,0), my=M(S_MAG,1);
+    double scaledX=rawX*mx, scaledY=rawY*my;
+    if(!isfinite(scaledX) || !isfinite(scaledY)) return originalHeading;
+    double delta=(atan2(scaledY,scaledX)-atan2(rawY,rawX))*180.0/M_PI;
+    double result=fmod(originalHeading+delta,360.0);
+    if(result<0) result+=360.0;
+    return result;
+}
 
 static NSUserDefaults *prefsDB(){ NSUserDefaults *d=[[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN]; return d?:[NSUserDefaults standardUserDefaults]; }
 static double readD(NSUserDefaults *d, NSString *k, double def){ id v=[d objectForKey:k]; return v?[v doubleValue]:def; }
@@ -75,6 +124,9 @@ static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, cons
 static CMAcceleration lastAccel={0}, lastAccelSpoof={0};
 static CMRotationRate lastGyro={0}, lastGyroSpoof={0};
 static CMAcceleration lastUserAccel={0}, lastGrav={0};
+static CMMagneticField lastMag={0}, lastMagSpoof={0};
+static CMCalibratedMagneticField lastMagCal={0}, lastMagCalSpoof={0};
+static double lastCompassHeading=0,lastCompassHeadingSpoof=0;
 static double lastRoll=0,lastPitch=0,lastYaw=0;
 static double lastRollS=0,lastPitchS=0,lastYawS=0;
 
@@ -85,13 +137,40 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (CMRotationRate)rotationRate{ CMRotationRate r=%orig; lastGyro=r; if(gEnabled && gSensorEnabled[S_GYRO]){ CMRotationRate s=r; s.x*=M(S_GYRO,0); s.y*=M(S_GYRO,1); s.z*=M(S_GYRO,2); lastGyroSpoof=s; return s; } lastGyroSpoof=r; return r; }
 %end
 %hook CMMagnetometerData
-- (CMMagneticField)magneticField{ CMMagneticField m=%orig; if(gEnabled && gSensorEnabled[S_MAG]){ m.x*=M(S_MAG,0); m.y*=M(S_MAG,1); m.z*=M(S_MAG,2); } return m; }
+- (CMMagneticField)magneticField{
+    CMMagneticField real=%orig;
+    lastMag=real;
+    CMMagneticField spoof=real;
+    if(gEnabled && gSensorEnabled[S_MAG]){ spoof.x*=M(S_MAG,0); spoof.y*=M(S_MAG,1); spoof.z*=M(S_MAG,2); }
+    lastMagSpoof=spoof;
+    return spoof;
+}
+%end
+
+%hook CLHeading
+- (CLLocationDirection)x{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,0); return v; }
+- (CLLocationDirection)y{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,1); return v; }
+- (CLLocationDirection)z{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,2); return v; }
+- (CLLocationDirection)magneticHeading{
+    CLLocationDirection real=%orig;
+    CLLocationDirection spoof=MSSpoofCompassHeading(self,real);
+    lastCompassHeading=real; lastCompassHeadingSpoof=spoof;
+    return spoof;
+}
+- (CLLocationDirection)trueHeading{ CLLocationDirection real=%orig; return MSSpoofCompassHeading(self,real); }
 %end
 %hook CMDeviceMotion
 - (CMAcceleration)userAcceleration{ CMAcceleration a=%orig; lastUserAccel=a; if(gEnabled && gSensorEnabled[S_USERACCEL]){ a.x*=M(S_USERACCEL,0); a.y*=M(S_USERACCEL,1); a.z*=M(S_USERACCEL,2); } return a; }
 - (CMAcceleration)gravity{ CMAcceleration a=%orig; lastGrav=a; if(gEnabled && gSensorEnabled[S_GRAVITY]){ a.x*=M(S_GRAVITY,0); a.y*=M(S_GRAVITY,1); a.z*=M(S_GRAVITY,2); } return a; }
 - (CMRotationRate)rotationRate{ CMRotationRate r=%orig; if(gEnabled && gSensorEnabled[S_ROTRATE]){ r.x*=M(S_ROTRATE,0); r.y*=M(S_ROTRATE,1); r.z*=M(S_ROTRATE,2); } return r; }
-- (CMCalibratedMagneticField)magneticField{ CMCalibratedMagneticField f=%orig; if(gEnabled && gSensorEnabled[S_MAGCAL]){ f.field.x*=M(S_MAGCAL,0); f.field.y*=M(S_MAGCAL,1); f.field.z*=M(S_MAGCAL,2); } return f; }
+- (CMCalibratedMagneticField)magneticField{
+    CMCalibratedMagneticField real=%orig;
+    lastMagCal=real;
+    CMCalibratedMagneticField spoof=real;
+    if(gEnabled && gSensorEnabled[S_MAGCAL]){ spoof.field.x*=M(S_MAGCAL,0); spoof.field.y*=M(S_MAGCAL,1); spoof.field.z*=M(S_MAGCAL,2); }
+    lastMagCalSpoof=spoof;
+    return spoof;
+}
 %end
 %hook CMAttitude
 - (double)roll{ double v=%orig; lastRoll=v; double s=gEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,0):v; lastRollS=s; return s; }
@@ -101,6 +180,25 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 %hook CMPedometerData
 - (NSNumber *)numberOfSteps{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_STEPS] && n) return @((long long)llround(n.doubleValue*mSteps)); return n; }
 - (NSNumber *)distance{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_DISTANCE] && n) return @(n.doubleValue*mDistance); return n; }
+%end
+
+// HealthKit-backed apps (including Pedometer-style apps) often read HKQuantitySample
+// values directly, while daily totals come from HKStatistics / HKStatisticsCollection.
+%hook HKQuantitySample
+- (HKQuantity *)quantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+%end
+
+%hook HKStatistics
+- (HKQuantity *)sumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)sumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)averageQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)averageQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)minimumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)minimumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)maximumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)maximumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)mostRecentQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
+- (HKQuantity *)mostRecentQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
 %end
 %hook CMAltitudeData
 - (NSNumber *)relativeAltitude{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_RELALT] && n) return @(n.doubleValue*mRelAlt); return n; }
@@ -335,7 +433,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     _advContainers[key]=advCont; advCont.hidden=!gSensorAdv[idx];
 
     // live readout
-    UILabel *live=[UILabel new]; live.font=[UIFont monospacedDigitSystemFontOfSize:9 weight:UIFontWeightRegular]; live.textColor=[UIColor secondaryLabelColor]; live.numberOfLines=1; live.textAlignment=NSTextAlignmentCenter; live.text=@"live: —";
+    UILabel *live=[UILabel new]; live.font=[UIFont monospacedDigitSystemFontOfSize:9 weight:UIFontWeightRegular]; live.textColor=[UIColor secondaryLabelColor]; live.numberOfLines=2; live.minimumScaleFactor=0.75; live.adjustsFontSizeToFitWidth=YES; live.textAlignment=NSTextAlignmentCenter; live.text=@"live: —";
     _liveLabels[key]=live;
 
     UIStackView *secStack=[[UIStackView alloc] initWithArrangedSubviews:@[header,absRow,advCont,live]]; secStack.axis=UILayoutConstraintAxisVertical; secStack.spacing=0;
@@ -370,7 +468,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     for(int i=0;i<3;i++) [_stack addArrangedSubview:[self sensorSectionForIdx:i]];
     [_stack addArrangedSubview:[self section:@"DEVICE MOTION"]];
     for(int i=3;i<8;i++) [_stack addArrangedSubview:[self sensorSectionForIdx:i]];
-    [_stack addArrangedSubview:[self section:@"ACTIVITY"]];
+    [_stack addArrangedSubview:[self section:@"ACTIVITY / HEALTHKIT + PEDOMETER"]];
     [_stack addArrangedSubview:[self extraRowForKey:@"steps" label:@"Steps" idx:E_STEPS]];
     [_stack addArrangedSubview:[self extraRowForKey:@"distance" label:@"Distance" idx:E_DISTANCE]];
     [_stack addArrangedSubview:[self section:@"BAROMETER"]];
@@ -435,6 +533,8 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
         NSString *txt=@"";
         if(i==S_ACCEL) txt=[NSString stringWithFormat:@"live: %.2f,%.2f,%.2f → %.2f,%.2f,%.2f", lastAccel.x,lastAccel.y,lastAccel.z, lastAccelSpoof.x,lastAccelSpoof.y,lastAccelSpoof.z];
         else if(i==S_GYRO) txt=[NSString stringWithFormat:@"live: %.2f,%.2f,%.2f → %.2f,%.2f,%.2f", lastGyro.x,lastGyro.y,lastGyro.z, lastGyroSpoof.x,lastGyroSpoof.y,lastGyroSpoof.z];
+        else if(i==S_MAG) txt=[NSString stringWithFormat:@"live mag: %.1f,%.1f,%.1f → %.1f,%.1f,%.1f | compass %.0f°→%.0f°", lastMag.x,lastMag.y,lastMag.z,lastMagSpoof.x,lastMagSpoof.y,lastMagSpoof.z,lastCompassHeading,lastCompassHeadingSpoof];
+        else if(i==S_MAGCAL) txt=[NSString stringWithFormat:@"live calibrated mag: %.1f,%.1f,%.1f → %.1f,%.1f,%.1f", lastMagCal.field.x,lastMagCal.field.y,lastMagCal.field.z,lastMagCalSpoof.field.x,lastMagCalSpoof.field.y,lastMagCalSpoof.field.z];
         else if(i==S_ATT) txt=[NSString stringWithFormat:@"live: r%.2f p%.2f y%.2f → r%.2f p%.2f y%.2f", lastRoll,lastPitch,lastYaw, lastRollS,lastPitchS,lastYawS];
         else txt=[NSString stringWithFormat:@"live: updating…"];
         live.text=txt;

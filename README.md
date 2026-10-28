@@ -1,8 +1,12 @@
-# MotionSpoofer V3 - Per-title toggle + live + per-sensor toggle + typed value
+# MotionSpoofer V3
 
-- Tap title (e.g. Accelerometer) to toggle All ↔ X/Y/Z for THAT sensor only
-- Per-sensor ON/OFF switch on each header
-- Live readout under each section (real → spoofed)
-- Tap value label to type custom value (-10 to 10, negative = inverted)
-- Button opacity/size sliders (persists)
-- Touch fixed: pass-through when panel closed
+- Tap a sensor title to switch between all-axis and per-axis controls.
+- Per-sensor ON/OFF switches and a master Enabled switch.
+- Live sensor readouts and editable multiplier values.
+- Slider values cover -100 to 100; typed multipliers can be set from -1000 to 1000.
+- Button opacity and size settings persist.
+- Two-window overlay keeps app touch input passing through when the panel is closed.
+- HealthKit read-side scaling for step counts and walking/running distance. The Steps/Distance multipliers affect `HKQuantitySample` and `HKStatistics` values returned to hooked apps; HealthKit records are not rewritten.
+- Magnetometer support includes `CMMagnetometerData`, calibrated `CMDeviceMotion` fields, and Core Location `CLHeading` fields/headings.
+
+The HealthKit behavior is applied in processes where the tweak is injected and that have HealthKit read access.
