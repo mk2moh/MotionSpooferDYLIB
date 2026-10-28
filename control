@@ -1,0 +1,9 @@
+Package: com.yourname.motionspoofer
+Name: MotionSpoofer InApp
+Version: 1.2.0
+Architecture: iphoneos-arm
+Description: Motion spoofer with draggable in-app overlay. Configure multipliers directly in the target app - saves between restarts. Works via jailbreak or TrollFools injection.
+Maintainer: you
+Author: you
+Section: Tweaks
+Depends: mobilesubstrate
