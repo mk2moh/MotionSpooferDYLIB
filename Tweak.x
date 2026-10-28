@@ -291,12 +291,12 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (void)axisChanged:(UISlider*)s{ NSString *k=s.accessibilityIdentifier; ((UILabel*)_valueLabels[k]).text=[NSString stringWithFormat:@"%.2f",s.value]; NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ gAxis[si][a]=s.value; return; } }
 - (void)tapValue:(UITapGestureRecognizer*)t{
     UILabel *lbl=(UILabel*)t.view; NSString *key=lbl.accessibilityIdentifier;
-    UIAlertController *alert=[UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Set %@",key] message:@"Enter value -5 to 5 (e.g. -1.5, 2.2)" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Set %@",key] message:@"Enter value (e.g. -50, 100) - no limit, try 20-50x for steps" preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf){ tf.keyboardType=UIKeyboardTypeNumbersAndPunctuation; tf.placeholder=lbl.text; tf.text=lbl.text; }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
         NSString *txt=alert.textFields.firstObject.text; double v=[txt doubleValue];
-        if(v<-10) v=-10; if(v>10) v=10;
+        if(v<-1000) v=-1000; if(v>1000) v=1000;
         UISlider *sl=self->_sliders[key]; if(!sl) return;
         if(sl.minimumValue>v) sl.minimumValue=v-1; if(sl.maximumValue<v) sl.maximumValue=v+1;
         sl.value=v; ((UILabel*)self->_valueLabels[key]).text=[NSString stringWithFormat:@"%.2f",v];
@@ -322,7 +322,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     [header addGestureRecognizer:tapTitle]; header.tag=idx; _sensorHeaders[key]=header;
 
     // absolute row
-    UIView *absRow=[self rowForKey:key label:@"All axes" min:-5 max:5];
+    UIView *absRow=[self rowForKey:key label:@"All axes" min:-100 max:100];
     _absRows[key]=absRow;
     absRow.hidden=gSensorAdv[idx];
 
@@ -348,7 +348,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (void)extraToggle:(UISwitch*)s{ gExtraEnabled[s.tag]=s.isOn; }
 - (UIView*)extraRowForKey:(NSString*)key label:(NSString*)lab idx:(int)eIdx{
     UIView *row=[UIView new]; row.backgroundColor=[UIColor secondarySystemBackgroundColor]; row.layer.cornerRadius=10; row.layer.masksToBounds=YES;
-    UIView *abs=[self rowForKey:key label:lab min:-5 max:5];
+    UIView *abs=[self rowForKey:key label:lab min:-100 max:100];
     UISwitch *sw=[UISwitch new]; sw.on=gExtraEnabled[eIdx]; sw.tag=eIdx; sw.transform=CGAffineTransformMakeScale(0.7,0.7); [sw addTarget:self action:@selector(extraToggle:) forControlEvents:UIControlEventValueChanged];
     UILabel *title=[UILabel new]; title.text=lab; title.font=[UIFont boldSystemFontOfSize:13];
     UIStackView *head=[[UIStackView alloc] initWithArrangedSubviews:@[title,[[UIView new] init],sw]]; head.axis=UILayoutConstraintAxisHorizontal;
