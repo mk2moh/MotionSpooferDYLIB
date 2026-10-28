@@ -3,16 +3,20 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ghcr.io/theos/theos:latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make perl python3 libplist-dev libssl-dev clang ldid dpkg fakeroot xz-utils
       - name: Setup Roothide Theos
         run: |
-          rm -rf /opt/theos
-          git clone --recursive https://github.com/roothide/theos /opt/theos
-          git clone --depth 1 https://github.com/theos/sdks /tmp/sdks
-          mkdir -p /opt/theos/sdks
-          cp -R /tmp/sdks/*.sdk /opt/theos/sdks/ || true
+          git clone --recursive https://github.com/roothide/theos $HOME/theos
+          git clone --depth 1 https://github.com/theos/sdks $HOME/sdks
+          mkdir -p $HOME/theos/sdks
+          cp -R $HOME/sdks/*.sdk $HOME/theos/sdks/ || true
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
       - name: Build
         run: gmake package FINALPACKAGE=1
       - uses: actions/upload-artifact@v4
