@@ -305,7 +305,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
         }
         [self setCur:v key:key];
     }]];
-    [_overlayWindow.rootViewController presentViewController:alert animated:YES completion:nil];
+    [_panelWindow.rootViewController presentViewController:alert animated:YES completion:nil];
 }
 - (UIView*)sensorSectionForIdx:(int)idx{
     NSString *label=sensorLabels()[idx]; NSString *key=sensorKeys()[idx];
