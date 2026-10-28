@@ -16,7 +16,6 @@ static inline double M(int s, int a) { return gAdv ? gAxis[s][a] : gBase[s]; }
 static NSArray *sensorKeys(){ return @[@"accel",@"gyro",@"mag",@"userAccel",@"gravity",@"rotRate",@"magCal",@"attitude"]; }
 static NSArray *sensorLabels(){ return @[@"Accelerometer",@"Gyroscope",@"Magnetometer",@"User Acceleration",@"Gravity",@"Rotation Rate",@"Calibrated Mag",@"Attitude (roll/pitch/yaw)"]; }
 static NSArray *axisLetters(){ return @[@"X",@"Y",@"Z"]; }
-static NSArray *attitudeLetters(){ return @[@"Roll",@"Pitch",@"Yaw"]; }
 
 static NSUserDefaults *prefsDB(){
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN];
