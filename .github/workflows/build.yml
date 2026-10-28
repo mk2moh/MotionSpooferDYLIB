@@ -2,21 +2,28 @@ name: Build deb
 on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git make perl python3 libplist-dev libssl-dev clang dpkg fakeroot xz-utils || true
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-roothide-macos14-v1
+      - name: Cache sdks
+        uses: actions/cache@v4
+        with:
+          path: ~/sdks
+          key: sdks-macos14-v1
+      - name: Install tools
+        run: brew install ldid dpkg make xz || brew upgrade ldid dpkg || true
       - name: Setup Roothide Theos
         run: |
-          git clone --recursive https://github.com/roothide/theos $HOME/theos
-          git clone --depth 1 https://github.com/theos/sdks $HOME/sdks
-          mkdir -p $HOME/theos/sdks
-          cp -R $HOME/sdks/*.sdk $HOME/theos/sdks/ || true
+          if [ ! -d "$HOME/theos" ]; then git clone --recursive https://github.com/roothide/theos "$HOME/theos"; fi
+          if [ ! -d "$HOME/sdks" ]; then git clone --depth 1 https://github.com/theos/sdks "$HOME/sdks"; fi
+          mkdir -p "$HOME/theos/sdks"
+          cp -Rn "$HOME/sdks/"*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
       - name: Build
         run: gmake package FINALPACKAGE=1
       - uses: actions/upload-artifact@v4
