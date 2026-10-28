@@ -2,28 +2,17 @@ name: Build deb
 on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
+    container: ghcr.io/theos/theos:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache Theos
-        uses: actions/cache@v4
-        with:
-          path: ~/theos
-          key: theos-roothide-${{ runner.os }}-v1
-      - name: Cache sdks
-        uses: actions/cache@v4
-        with:
-          path: ~/sdks
-          key: sdks-v1
-      - name: Install tools
-        run: brew install ldid dpkg make xz || brew upgrade ldid dpkg
-      - name: Setup Theos
+      - name: Setup Roothide Theos
         run: |
-          [ -d "$HOME/theos" ] || git clone --recursive https://github.com/roothide/theos "$HOME/theos"
-          [ -d "$HOME/sdks" ] || git clone --depth 1 https://github.com/theos/sdks "$HOME/sdks"
-          mkdir -p "$HOME/theos/sdks"
-          cp -Rn "$HOME/sdks/"*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          rm -rf /opt/theos
+          git clone --recursive https://github.com/roothide/theos /opt/theos
+          git clone --depth 1 https://github.com/theos/sdks /tmp/sdks
+          mkdir -p /opt/theos/sdks
+          cp -R /tmp/sdks/*.sdk /opt/theos/sdks/ || true
       - name: Build
         run: gmake package FINALPACKAGE=1
       - uses: actions/upload-artifact@v4
