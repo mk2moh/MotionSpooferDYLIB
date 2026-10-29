@@ -1,6 +1,6 @@
-# MotionSpoofer v1.5.0
+# MotionSpoofer v1.5.1
 
-The GitHub Actions workflow builds two separate outputs and packages both in `MotionSpoofer-v<version>.zip`. After pushing the source, download the versioned artifact from the **Build MotionSpoofer artifacts** workflow:
+The GitHub Actions workflow builds two separate outputs and packages both in `MotionSpoofer-v<version>.zip`. After pushing the source, download the versioned artifact from the **Build MotionSpoofer artifacts** workflow. Version 1.5.1 also fixes the standalone dependency audit: it ignores the dylib's own Theos install ID and checks only actual linked libraries.
 
 - **Jailbreak `.deb`:** the normal tweak build, including the Settings pane, installed-app overlay selection, global HealthKit Steps/Distance multipliers, and global CoreMotion multipliers.
 - **TrollFools `.dylib`:** a standalone build using Logos' internal Objective-C runtime generator. It does not link MobileSubstrate and omits the HealthKit/Pedometer hooks. Inject it into the app you want to test; its control panel opens when that app launches.

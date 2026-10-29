@@ -1,6 +1,6 @@
 Package: com.yourname.motionspoofer
 Name: MotionSpoofer V3
-Version: 1.5.0
+Version: 1.5.1
 Architecture: iphoneos-arm
 Description: Per-app motion controls, Settings app selection, global sensor overrides, and HealthKit multipliers.
 Maintainer: you
