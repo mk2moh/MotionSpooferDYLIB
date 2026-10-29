@@ -11,7 +11,9 @@
 enum { S_ACCEL, S_GYRO, S_MAG, S_USERACCEL, S_GRAVITY, S_ROTRATE, S_MAGCAL, S_ATT, S_COUNT };
 enum { E_STEPS, E_DISTANCE, E_PRESSURE, E_RELALT, E_COUNT };
 
-static BOOL   gEnabled = YES;
+static BOOL   gEnabled = YES;       // Global master; managed in iOS Settings.
+static BOOL   gAppEnabled = YES;    // Per-app sensor master; managed in the overlay.
+static NSString *gAppBundleID=nil;
 static BOOL   gSensorEnabled[S_COUNT];
 static BOOL   gSensorAdv[S_COUNT];
 static BOOL   gExtraEnabled[E_COUNT];
@@ -25,8 +27,19 @@ static NSArray *sensorKeys(){ return @[@"accel",@"gyro",@"mag",@"userAccel",@"gr
 static NSArray *sensorLabels(){ return @[@"Accelerometer",@"Gyroscope",@"Magnetometer",@"User Acceleration",@"Gravity",@"Rotation Rate",@"Calibrated Mag",@"Attitude"]; }
 static NSArray *axisLetters(){ return @[@"X",@"Y",@"Z"]; }
 
-// HealthKit exposes steps through HKQuantitySample and HKStatistics, not CMPedometerData.
-// Scale only the quantities returned by HealthKit getters; the stored Health database is untouched.
+static NSUserDefaults *prefsDB(){ NSUserDefaults *d=[[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN]; return d?:[NSUserDefaults standardUserDefaults]; }
+static double readD(id source, NSString *k, double def){ id v=[source objectForKey:k]; return v?[v doubleValue]:def; }
+static BOOL readB(id source, NSString *k, BOOL def){ id v=[source objectForKey:k]; return v?[v boolValue]:def; }
+static void refreshOverlayForCurrentApp(void);
+
+static BOOL MSShouldShowOverlay(void){
+    NSString *bundleID=NSBundle.mainBundle.bundleIdentifier;
+    if(!bundleID.length || [bundleID hasPrefix:@"com.apple."] || [bundleID isEqualToString:@"com.apple"]) return NO;
+    NSArray *allowed=[prefsDB() arrayForKey:@"overlayBundleIDs"];
+    return [allowed containsObject:bundleID];
+}
+
+// HealthKit values are globally scaled from Settings; raw records remain unchanged.
 static HKQuantity *MSSpoofHealthQuantity(HKQuantity *quantity, HKQuantityType *type){
     if(!quantity || !type || !gEnabled) return quantity;
     NSString *identifier=type.identifier;
@@ -48,11 +61,11 @@ static HKQuantity *MSSpoofHealthQuantity(HKQuantity *quantity, HKQuantityType *t
     return [HKQuantity quantityWithUnit:unit doubleValue:scaled];
 }
 
-// CLHeading's component getters are used below to keep compass heading consistent with
-// the magnetometer's per-axis scale. Bypass the hooked getters while reading raw components.
+// CLHeading's component getters are used to keep compass headings consistent with
+// the current app's per-axis magnetometer scale.
 static __thread BOOL gMSRawCompassAxes=NO;
 static double MSSpoofCompassHeading(CLHeading *heading, double originalHeading){
-    if(!heading || !gEnabled || !gSensorEnabled[S_MAG] || originalHeading<0) return originalHeading;
+    if(!heading || !gEnabled || !gAppEnabled || !gSensorEnabled[S_MAG] || originalHeading<0) return originalHeading;
     double rawX=0, rawY=0;
     gMSRawCompassAxes=YES;
     @try {
@@ -71,54 +84,72 @@ static double MSSpoofCompassHeading(CLHeading *heading, double originalHeading){
     return result;
 }
 
-static NSUserDefaults *prefsDB(){ NSUserDefaults *d=[[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN]; return d?:[NSUserDefaults standardUserDefaults]; }
-static double readD(NSUserDefaults *d, NSString *k, double def){ id v=[d objectForKey:k]; return v?[v doubleValue]:def; }
 static void loadPrefs(void){
-    NSUserDefaults *d=prefsDB(); NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
-    gEnabled=[d objectForKey:@"enabled"]?[d boolForKey:@"enabled"]:YES;
+    NSUserDefaults *d=prefsDB();
+    gAppBundleID=NSBundle.mainBundle.bundleIdentifier?:@"unknown";
+    NSDictionary *allApps=[d dictionaryForKey:@"appPrefs"];
+    NSDictionary *app=[allApps[gAppBundleID] isKindOfClass:[NSDictionary class]]?allApps[gAppBundleID]:nil;
+    id local=app?:d; // Use legacy flat preferences as defaults when migrating existing installs.
+
+    gEnabled=readB(d,@"enabled",YES);
+    gAppEnabled=readB(local,@"appEnabled",YES);
+    NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
     for(int s=0;s<S_COUNT;s++){
         NSString *ek=[NSString stringWithFormat:@"%@Enabled",keys[s]];
-        gSensorEnabled[s]=[d objectForKey:ek]?[d boolForKey:ek]:YES;
+        gSensorEnabled[s]=readB(local,ek,YES);
         NSString *ak=[NSString stringWithFormat:@"%@Adv",keys[s]];
-        gSensorAdv[s]=[d objectForKey:ak]?[d boolForKey:ak]:NO;
-        gBase[s]=readD(d,keys[s],1);
-        for(int a=0;a<3;a++) gAxis[s][a]=readD(d,[keys[s] stringByAppendingString:ax[a]],1);
+        gSensorAdv[s]=readB(local,ak,NO);
+        gBase[s]=readD(local,keys[s],1);
+        for(int a=0;a<3;a++) gAxis[s][a]=readD(local,[keys[s] stringByAppendingString:ax[a]],1);
     }
-    gExtraEnabled[E_STEPS]=[d objectForKey:@"stepsEnabled"]?[d boolForKey:@"stepsEnabled"]:YES;
-    gExtraEnabled[E_DISTANCE]=[d objectForKey:@"distanceEnabled"]?[d boolForKey:@"distanceEnabled"]:YES;
-    gExtraEnabled[E_PRESSURE]=[d objectForKey:@"pressureEnabled"]?[d boolForKey:@"pressureEnabled"]:YES;
-    gExtraEnabled[E_RELALT]=[d objectForKey:@"relAltEnabled"]?[d boolForKey:@"relAltEnabled"]:YES;
-    mSteps=readD(d,@"steps",1); mDistance=readD(d,@"distance",1); mPressure=readD(d,@"pressure",1); mRelAlt=readD(d,@"relAlt",1);
-    gBtnOpacity=readD(d,@"btnOpacity",0.92); gBtnSize=readD(d,@"btnSize",54);
+    gExtraEnabled[E_STEPS]=readB(d,@"stepsEnabled",YES);
+    gExtraEnabled[E_DISTANCE]=readB(d,@"distanceEnabled",YES);
+    gExtraEnabled[E_PRESSURE]=readB(local,@"pressureEnabled",YES);
+    gExtraEnabled[E_RELALT]=readB(local,@"relAltEnabled",YES);
+    mSteps=readD(d,@"steps",1); mDistance=readD(d,@"distance",1);
+    mPressure=readD(local,@"pressure",1); mRelAlt=readD(local,@"relAlt",1);
+    gBtnOpacity=readD(local,@"btnOpacity",0.92); gBtnSize=readD(local,@"btnSize",54);
 }
+
+// Save only the current app's CoreMotion settings here. Global HealthKit values
+// are written by the Settings preference pane, avoiding per-app overwrites.
 static void savePrefs(void){
-    NSUserDefaults *d=prefsDB(); NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
-    [d setBool:gEnabled forKey:@"enabled"];
+    NSUserDefaults *d=prefsDB();
+    if(!gAppBundleID.length) gAppBundleID=NSBundle.mainBundle.bundleIdentifier?:@"unknown";
+    NSMutableDictionary *apps=[[d dictionaryForKey:@"appPrefs"] mutableCopy]?:[NSMutableDictionary dictionary];
+    NSMutableDictionary *app=[NSMutableDictionary dictionary];
+    NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
+    app[@"appEnabled"]=@(gAppEnabled);
     for(int s=0;s<S_COUNT;s++){
-        [d setBool:gSensorEnabled[s] forKey:[NSString stringWithFormat:@"%@Enabled",keys[s]]];
-        [d setBool:gSensorAdv[s] forKey:[NSString stringWithFormat:@"%@Adv",keys[s]]];
-        [d setDouble:gBase[s] forKey:keys[s]];
-        for(int a=0;a<3;a++) [d setDouble:gAxis[s][a] forKey:[keys[s] stringByAppendingString:ax[a]]];
+        app[[NSString stringWithFormat:@"%@Enabled",keys[s]]]=@(gSensorEnabled[s]);
+        app[[NSString stringWithFormat:@"%@Adv",keys[s]]]=@(gSensorAdv[s]);
+        app[keys[s]]=@(gBase[s]);
+        for(int a=0;a<3;a++) app[[keys[s] stringByAppendingString:ax[a]]]=@(gAxis[s][a]);
     }
-    [d setBool:gExtraEnabled[E_STEPS] forKey:@"stepsEnabled"];
-    [d setBool:gExtraEnabled[E_DISTANCE] forKey:@"distanceEnabled"];
-    [d setBool:gExtraEnabled[E_PRESSURE] forKey:@"pressureEnabled"];
-    [d setBool:gExtraEnabled[E_RELALT] forKey:@"relAltEnabled"];
-    [d setDouble:mSteps forKey:@"steps"]; [d setDouble:mDistance forKey:@"distance"]; [d setDouble:mPressure forKey:@"pressure"]; [d setDouble:mRelAlt forKey:@"relAlt"];
-    [d setDouble:gBtnOpacity forKey:@"btnOpacity"]; [d setDouble:gBtnSize forKey:@"btnSize"];
+    app[@"pressureEnabled"]=@(gExtraEnabled[E_PRESSURE]);
+    app[@"relAltEnabled"]=@(gExtraEnabled[E_RELALT]);
+    app[@"pressure"]=@(mPressure); app[@"relAlt"]=@(mRelAlt);
+    app[@"btnOpacity"]=@(gBtnOpacity); app[@"btnSize"]=@(gBtnSize);
+    apps[gAppBundleID]=app;
+    [d setObject:apps forKey:@"appPrefs"];
     [d synchronize];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(PREF_CHANGED), NULL, NULL, true);
+
     NSString *doc=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     if(doc){
-        NSMutableDictionary *dict=[NSMutableDictionary dictionary]; NSArray *keys2=sensorKeys(); NSArray *ax2=axisLetters();
-        dict[@"enabled"]=@(gEnabled);
-        for(int s=0;s<S_COUNT;s++){ dict[keys2[s]]=@(gBase[s]); dict[[NSString stringWithFormat:@"%@Enabled",keys2[s]]]=@(gSensorEnabled[s]); dict[[NSString stringWithFormat:@"%@Adv",keys2[s]]]=@(gSensorAdv[s]); for(int a=0;a<3;a++) dict[[keys2[s] stringByAppendingString:ax2[a]]]=@(gAxis[s][a]); }
-        dict[@"steps"]=@(mSteps); dict[@"stepsEnabled"]=@(gExtraEnabled[E_STEPS]); dict[@"distance"]=@(mDistance); dict[@"distanceEnabled"]=@(gExtraEnabled[E_DISTANCE]); dict[@"pressure"]=@(mPressure); dict[@"pressureEnabled"]=@(gExtraEnabled[E_PRESSURE]); dict[@"relAlt"]=@(mRelAlt); dict[@"relAltEnabled"]=@(gExtraEnabled[E_RELALT]); dict[@"btnOpacity"]=@(gBtnOpacity); dict[@"btnSize"]=@(gBtnSize);
+        NSMutableDictionary *export=[app mutableCopy];
+        export[@"bundleIdentifier"]=gAppBundleID;
+        export[@"globalEnabled"]=@(gEnabled);
+        export[@"steps"]=@(mSteps); export[@"stepsEnabled"]=@(gExtraEnabled[E_STEPS]);
+        export[@"distance"]=@(mDistance); export[@"distanceEnabled"]=@(gExtraEnabled[E_DISTANCE]);
         NSString *p=[doc stringByAppendingPathComponent:@"MotionSpoofer.json"];
-        NSData *j=[NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil]; [j writeToFile:p atomically:YES];
+        NSData *j=[NSJSONSerialization dataWithJSONObject:export options:NSJSONWritingPrettyPrinted error:nil]; [j writeToFile:p atomically:YES];
     }
 }
-static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u){ loadPrefs(); }
+static void prefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u){
+    loadPrefs();
+    dispatch_async(dispatch_get_main_queue(),^{ refreshOverlayForCurrentApp(); });
+}
 
 // live capture for readout
 static CMAcceleration lastAccel={0}, lastAccelSpoof={0};
@@ -131,26 +162,26 @@ static double lastRoll=0,lastPitch=0,lastYaw=0;
 static double lastRollS=0,lastPitchS=0,lastYawS=0;
 
 %hook CMAccelerometerData
-- (CMAcceleration)acceleration{ CMAcceleration a=%orig; lastAccel=a; if(gEnabled && gSensorEnabled[S_ACCEL]){ CMAcceleration s=a; s.x*=M(S_ACCEL,0); s.y*=M(S_ACCEL,1); s.z*=M(S_ACCEL,2); lastAccelSpoof=s; return s; } lastAccelSpoof=a; return a; }
+- (CMAcceleration)acceleration{ CMAcceleration a=%orig; lastAccel=a; if(gEnabled && gAppEnabled && gSensorEnabled[S_ACCEL]){ CMAcceleration s=a; s.x*=M(S_ACCEL,0); s.y*=M(S_ACCEL,1); s.z*=M(S_ACCEL,2); lastAccelSpoof=s; return s; } lastAccelSpoof=a; return a; }
 %end
 %hook CMGyroData
-- (CMRotationRate)rotationRate{ CMRotationRate r=%orig; lastGyro=r; if(gEnabled && gSensorEnabled[S_GYRO]){ CMRotationRate s=r; s.x*=M(S_GYRO,0); s.y*=M(S_GYRO,1); s.z*=M(S_GYRO,2); lastGyroSpoof=s; return s; } lastGyroSpoof=r; return r; }
+- (CMRotationRate)rotationRate{ CMRotationRate r=%orig; lastGyro=r; if(gEnabled && gAppEnabled && gSensorEnabled[S_GYRO]){ CMRotationRate s=r; s.x*=M(S_GYRO,0); s.y*=M(S_GYRO,1); s.z*=M(S_GYRO,2); lastGyroSpoof=s; return s; } lastGyroSpoof=r; return r; }
 %end
 %hook CMMagnetometerData
 - (CMMagneticField)magneticField{
     CMMagneticField real=%orig;
     lastMag=real;
     CMMagneticField spoof=real;
-    if(gEnabled && gSensorEnabled[S_MAG]){ spoof.x*=M(S_MAG,0); spoof.y*=M(S_MAG,1); spoof.z*=M(S_MAG,2); }
+    if(gEnabled && gAppEnabled && gSensorEnabled[S_MAG]){ spoof.x*=M(S_MAG,0); spoof.y*=M(S_MAG,1); spoof.z*=M(S_MAG,2); }
     lastMagSpoof=spoof;
     return spoof;
 }
 %end
 
 %hook CLHeading
-- (CLLocationDirection)x{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,0); return v; }
-- (CLLocationDirection)y{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,1); return v; }
-- (CLLocationDirection)z{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,2); return v; }
+- (CLLocationDirection)x{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gAppEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,0); return v; }
+- (CLLocationDirection)y{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gAppEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,1); return v; }
+- (CLLocationDirection)z{ CLLocationDirection v=%orig; if(!gMSRawCompassAxes && gEnabled && gAppEnabled && gSensorEnabled[S_MAG]) v*=M(S_MAG,2); return v; }
 - (CLLocationDirection)magneticHeading{
     CLLocationDirection real=%orig;
     CLLocationDirection spoof=MSSpoofCompassHeading(self,real);
@@ -160,22 +191,22 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (CLLocationDirection)trueHeading{ CLLocationDirection real=%orig; return MSSpoofCompassHeading(self,real); }
 %end
 %hook CMDeviceMotion
-- (CMAcceleration)userAcceleration{ CMAcceleration a=%orig; lastUserAccel=a; if(gEnabled && gSensorEnabled[S_USERACCEL]){ a.x*=M(S_USERACCEL,0); a.y*=M(S_USERACCEL,1); a.z*=M(S_USERACCEL,2); } return a; }
-- (CMAcceleration)gravity{ CMAcceleration a=%orig; lastGrav=a; if(gEnabled && gSensorEnabled[S_GRAVITY]){ a.x*=M(S_GRAVITY,0); a.y*=M(S_GRAVITY,1); a.z*=M(S_GRAVITY,2); } return a; }
-- (CMRotationRate)rotationRate{ CMRotationRate r=%orig; if(gEnabled && gSensorEnabled[S_ROTRATE]){ r.x*=M(S_ROTRATE,0); r.y*=M(S_ROTRATE,1); r.z*=M(S_ROTRATE,2); } return r; }
+- (CMAcceleration)userAcceleration{ CMAcceleration a=%orig; lastUserAccel=a; if(gEnabled && gAppEnabled && gSensorEnabled[S_USERACCEL]){ a.x*=M(S_USERACCEL,0); a.y*=M(S_USERACCEL,1); a.z*=M(S_USERACCEL,2); } return a; }
+- (CMAcceleration)gravity{ CMAcceleration a=%orig; lastGrav=a; if(gEnabled && gAppEnabled && gSensorEnabled[S_GRAVITY]){ a.x*=M(S_GRAVITY,0); a.y*=M(S_GRAVITY,1); a.z*=M(S_GRAVITY,2); } return a; }
+- (CMRotationRate)rotationRate{ CMRotationRate r=%orig; if(gEnabled && gAppEnabled && gSensorEnabled[S_ROTRATE]){ r.x*=M(S_ROTRATE,0); r.y*=M(S_ROTRATE,1); r.z*=M(S_ROTRATE,2); } return r; }
 - (CMCalibratedMagneticField)magneticField{
     CMCalibratedMagneticField real=%orig;
     lastMagCal=real;
     CMCalibratedMagneticField spoof=real;
-    if(gEnabled && gSensorEnabled[S_MAGCAL]){ spoof.field.x*=M(S_MAGCAL,0); spoof.field.y*=M(S_MAGCAL,1); spoof.field.z*=M(S_MAGCAL,2); }
+    if(gEnabled && gAppEnabled && gSensorEnabled[S_MAGCAL]){ spoof.field.x*=M(S_MAGCAL,0); spoof.field.y*=M(S_MAGCAL,1); spoof.field.z*=M(S_MAGCAL,2); }
     lastMagCalSpoof=spoof;
     return spoof;
 }
 %end
 %hook CMAttitude
-- (double)roll{ double v=%orig; lastRoll=v; double s=gEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,0):v; lastRollS=s; return s; }
-- (double)pitch{ double v=%orig; lastPitch=v; double s=gEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,1):v; lastPitchS=s; return s; }
-- (double)yaw{ double v=%orig; lastYaw=v; double s=gEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,2):v; lastYawS=s; return s; }
+- (double)roll{ double v=%orig; lastRoll=v; double s=gEnabled && gAppEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,0):v; lastRollS=s; return s; }
+- (double)pitch{ double v=%orig; lastPitch=v; double s=gEnabled && gAppEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,1):v; lastPitchS=s; return s; }
+- (double)yaw{ double v=%orig; lastYaw=v; double s=gEnabled && gAppEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,2):v; lastYawS=s; return s; }
 %end
 %hook CMPedometerData
 - (NSNumber *)numberOfSteps{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_STEPS] && n) return @((long long)llround(n.doubleValue*mSteps)); return n; }
@@ -201,8 +232,8 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (HKQuantity *)mostRecentQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
 %end
 %hook CMAltitudeData
-- (NSNumber *)relativeAltitude{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_RELALT] && n) return @(n.doubleValue*mRelAlt); return n; }
-- (NSNumber *)pressure{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_PRESSURE] && n) return @(n.doubleValue*mPressure); return n; }
+- (NSNumber *)relativeAltitude{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_RELALT] && n) return @(n.doubleValue*mRelAlt); return n; }
+- (NSNumber *)pressure{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_PRESSURE] && n) return @(n.doubleValue*mPressure); return n; }
 %end
 
 // PassThrough view to fix touch bug
@@ -227,7 +258,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 @end
 
 @interface MSMotionOverlay : NSObject
-+ (instancetype)shared; - (void)installIfNeeded; - (void)togglePanel;
++ (instancetype)shared; - (void)installIfNeeded; - (void)reconcileVisibility; - (void)togglePanel;
 @end
 
 @implementation MSMotionOverlay {
@@ -240,7 +271,18 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     CGPoint _panStart;
 }
 + (instancetype)shared{ static MSMotionOverlay *s; static dispatch_once_t t; dispatch_once(&t,^{s=[MSMotionOverlay new];}); return s; }
-- (void)installIfNeeded{ if(_floatWindow) return; dispatch_async(dispatch_get_main_queue(),^{ [self createWindow]; }); }
+- (void)installIfNeeded{
+    if(!MSShouldShowOverlay() || [UIApplication sharedApplication].applicationState==UIApplicationStateBackground) return;
+    if(_floatWindow){
+        dispatch_async(dispatch_get_main_queue(),^{ self->_floatWindow.hidden=NO; });
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(),^{ if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground && !self->_floatWindow) [self createWindow]; });
+}
+- (void)reconcileVisibility{
+    if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground) [self installIfNeeded];
+    else dispatch_async(dispatch_get_main_queue(),^{ self->_panelWindow.hidden=YES; self->_floatWindow.hidden=YES; });
+}
 - (UIWindow*)findWindowScene{
     for(UIScene *sec in [UIApplication sharedApplication].connectedScenes){
         if([sec isKindOfClass:[UIWindowScene class]]){
@@ -259,6 +301,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 }
 - (void)createWindow{
+    if(!MSShouldShowOverlay() || [UIApplication sharedApplication].applicationState==UIApplicationStateBackground) return;
     UIWindow *sceneWin=[self findWindowScene];
     UIWindowScene *scene = (UIWindowScene*)sceneWin.windowScene;
     CGRect floatFrame=CGRectMake(20,90,gBtnSize,gBtnSize);
@@ -457,21 +500,18 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 }
 - (void)buildCard{
     UILabel *t=[UILabel new]; t.text=@"MotionSpoofer • Live"; t.font=[UIFont boldSystemFontOfSize:17]; t.textAlignment=NSTextAlignmentCenter; [_stack addArrangedSubview:t];
-    UILabel *sub=[UILabel new]; sub.text=@"Tap title to toggle All → X/Y/Z. Tap value to type. Negative = inverted. Drag MS button."; sub.font=[UIFont systemFontOfSize:10]; sub.textColor=[UIColor secondaryLabelColor]; sub.numberOfLines=0; sub.textAlignment=NSTextAlignmentCenter; [_stack addArrangedSubview:sub];
+    UILabel *sub=[UILabel new]; sub.text=@"Per-app sensor controls. Tap title for X/Y/Z; tap values to type. Drag the MS button."; sub.font=[UIFont systemFontOfSize:10]; sub.textColor=[UIColor secondaryLabelColor]; sub.numberOfLines=0; sub.textAlignment=NSTextAlignmentCenter; [_stack addArrangedSubview:sub];
     UIStackView *enRow=[UIStackView new]; enRow.axis=UILayoutConstraintAxisHorizontal; enRow.spacing=8;
-    UILabel *enL=[UILabel new]; enL.text=@"Master Enabled"; enL.font=[UIFont boldSystemFontOfSize:14];
-    _enabledSwitch=[UISwitch new]; _enabledSwitch.on=gEnabled; [_enabledSwitch addTarget:self action:@selector(masterToggle:) forControlEvents:UIControlEventValueChanged];
+    UILabel *enL=[UILabel new]; enL.text=@"This App's Sensors Enabled"; enL.font=[UIFont boldSystemFontOfSize:14];
+    _enabledSwitch=[UISwitch new]; _enabledSwitch.on=gAppEnabled; [_enabledSwitch addTarget:self action:@selector(masterToggle:) forControlEvents:UIControlEventValueChanged];
     UIView *sp=[UIView new]; [sp setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [enRow addArrangedSubview:enL]; [enRow addArrangedSubview:sp]; [enRow addArrangedSubview:_enabledSwitch]; [_stack addArrangedSubview:enRow];
     UIView *sep=[UIView new]; sep.backgroundColor=[UIColor separatorColor]; [sep.heightAnchor constraintEqualToConstant:1].active=YES; [_stack addArrangedSubview:sep];
-    [_stack addArrangedSubview:[self section:@"RAW SENSORS"]];
+    [_stack addArrangedSubview:[self section:@"PER-APP RAW SENSORS"]];
     for(int i=0;i<3;i++) [_stack addArrangedSubview:[self sensorSectionForIdx:i]];
     [_stack addArrangedSubview:[self section:@"DEVICE MOTION"]];
     for(int i=3;i<8;i++) [_stack addArrangedSubview:[self sensorSectionForIdx:i]];
-    [_stack addArrangedSubview:[self section:@"ACTIVITY / HEALTHKIT + PEDOMETER"]];
-    [_stack addArrangedSubview:[self extraRowForKey:@"steps" label:@"Steps" idx:E_STEPS]];
-    [_stack addArrangedSubview:[self extraRowForKey:@"distance" label:@"Distance" idx:E_DISTANCE]];
-    [_stack addArrangedSubview:[self section:@"BAROMETER"]];
+    [_stack addArrangedSubview:[self section:@"PER-APP BAROMETER"]];
     [_stack addArrangedSubview:[self extraRowForKey:@"pressure" label:@"Pressure" idx:E_PRESSURE]];
     [_stack addArrangedSubview:[self extraRowForKey:@"relAlt" label:@"Relative Alt" idx:E_RELALT]];
     // Button controls
@@ -490,9 +530,8 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     [btns addArrangedSubview:rst]; [btns addArrangedSubview:hide]; [_stack addArrangedSubview:btns];
     UIButton *rm=[UIButton buttonWithType:UIButtonTypeSystem]; [rm setTitle:@"Hide floating button until next launch" forState:UIControlStateNormal]; rm.titleLabel.font=[UIFont systemFontOfSize:11]; [rm setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal]; [rm addTarget:self action:@selector(hideFloat) forControlEvents:UIControlEventTouchUpInside]; [_stack addArrangedSubview:rm];
 }
-- (void)masterToggle:(UISwitch*)s{ gEnabled=s.isOn; }
+- (void)masterToggle:(UISwitch*)s{ gAppEnabled=s.isOn; }
 - (void)saveTap{
-    savePrefs();
     gBtnOpacity=((UISlider*)_sliders[@"btnOpacity"]).value; gBtnSize=((UISlider*)_sliders[@"btnSize"]).value;
     _floatBtn.alpha=gBtnOpacity; _floatBtn.backgroundColor=[UIColor colorWithRed:0.12 green:0.65 blue:0.95 alpha:gBtnOpacity];
     CGRect f=_floatBtn.frame; f.size=CGSizeMake(gBtnSize,gBtnSize); _floatBtn.layer.cornerRadius=gBtnSize/2; _floatBtn.frame=f;
@@ -507,11 +546,11 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
         for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ gAxis[si][a]=1; isAxis=YES; }
         if(!isAxis) [self setCur:1 key:k];
     }
-    gEnabled=YES; _enabledSwitch.on=YES; savePrefs();
+    gAppEnabled=YES; _enabledSwitch.on=YES; savePrefs();
 }
 - (void)hideFloat{ _floatWindow.hidden=YES; _panelWindow.hidden=YES; }
 - (void)refreshUI{
-    _enabledSwitch.on=gEnabled;
+    _enabledSwitch.on=gAppEnabled;
     for(NSString *k in _sliders.allKeys){
         float v=[self cur:k]; NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
         for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]) v=(float)gAxis[si][a];
@@ -543,9 +582,13 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 }
 @end
 
+static void refreshOverlayForCurrentApp(void){ [[MSMotionOverlay shared] reconcileVisibility]; }
+
 %ctor{
     loadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChanged, CFSTR(PREF_CHANGED), NULL, CFNotificationSuspensionBehaviorCoalesce);
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ [[MSMotionOverlay shared] installIfNeeded]; }); }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if([UIApplication sharedApplication].applicationState!=UIApplicationStateBackground) [[MSMotionOverlay shared] installIfNeeded]; });
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ [[MSMotionOverlay shared] reconcileVisibility]; }); }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ [[MSMotionOverlay shared] reconcileVisibility]; }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ [[MSMotionOverlay shared] reconcileVisibility]; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if([UIApplication sharedApplication].applicationState!=UIApplicationStateBackground) [[MSMotionOverlay shared] reconcileVisibility]; });
 }

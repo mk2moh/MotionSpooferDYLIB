@@ -1,9 +1,9 @@
 Package: com.yourname.motionspoofer
 Name: MotionSpoofer V3
-Version: 1.3.0
+Version: 1.4.1
 Architecture: iphoneos-arm
-Description: In-app overlay with per-title X/Y/Z toggle, per-sensor enable, live values, typed value entry, button controls. Fixed touch passthrough.
+Description: Per-app motion sensor controls with configurable overlay and global HealthKit step/distance multipliers in Settings.
 Maintainer: you
 Author: you
 Section: Tweaks
-Depends: mobilesubstrate
+Depends: mobilesubstrate, preferenceloader
