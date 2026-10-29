@@ -47,8 +47,13 @@ jobs:
           test -n "$DYLIB_PATH"
           mkdir -p release
           cp "$DYLIB_PATH" "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib"
-          otool -L "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib" | tee release/trollfools-dylib-dependencies.txt
-          if otool -L "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib" | grep -Eiq 'substrate|substitute|libhooker'; then
+          DYLIB="release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib"
+          otool -L "$DYLIB" | tee release/trollfools-dylib-load-commands.txt
+          # otool -L lists the dylib's own LC_ID_DYLIB first. The default Theos
+          # install ID contains "MobileSubstrate" even for the internal Logos
+          # generator; it is not a linked dependency. Check only later entries.
+          otool -L "$DYLIB" | sed '1,2d' | tee release/trollfools-dylib-dependencies.txt
+          if grep -Eiq 'substrate|substitute|libhooker' release/trollfools-dylib-dependencies.txt; then
             echo "Standalone dylib unexpectedly links to a tweak-hook runtime." >&2
             exit 1
           fi
