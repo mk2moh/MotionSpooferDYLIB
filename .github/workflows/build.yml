@@ -1,32 +1,86 @@
-name: Build deb
+name: Build MotionSpoofer artifacts
 on: [push, workflow_dispatch]
+
 jobs:
   build:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
       - name: Cache Theos
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-roothide-macos14-v1
-      - name: Cache sdks
+          key: theos-roothide-macos14-v2
+
+      - name: Cache SDKs
         uses: actions/cache@v4
         with:
           path: ~/sdks
           key: sdks-macos14-v1
+
       - name: Install tools
-        run: brew install ldid dpkg make xz || brew upgrade ldid dpkg || true
+        run: brew install ldid dpkg make xz zip || brew upgrade ldid dpkg || true
+
+      - name: Set version
+        run: |
+          VERSION="$(awk -F': ' '$1 == "Version" { print $2; exit }' control)"
+          test -n "$VERSION"
+          echo "MOTION_SPOOFER_VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Setup Roothide Theos
         run: |
           if [ ! -d "$HOME/theos" ]; then git clone --recursive https://github.com/roothide/theos "$HOME/theos"; fi
           if [ ! -d "$HOME/sdks" ]; then git clone --depth 1 https://github.com/theos/sdks "$HOME/sdks"; fi
           mkdir -p "$HOME/theos/sdks"
           cp -Rn "$HOME/sdks/"*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-      - name: Build
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build jailbreak package
         run: gmake package FINALPACKAGE=1
+
+      - name: Build TrollFools standalone dylib
+        run: |
+          gmake -f TrollFools.mk clean
+          gmake -f TrollFools.mk all FINALPACKAGE=1
+          DYLIB_PATH="$(find .theos/obj -type f -name 'MotionSpooferTrollFools.dylib' -print -quit)"
+          test -n "$DYLIB_PATH"
+          mkdir -p release
+          cp "$DYLIB_PATH" "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib"
+          otool -L "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib" | tee release/trollfools-dylib-dependencies.txt
+          if otool -L "release/MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib" | grep -Eiq 'substrate|substitute|libhooker'; then
+            echo "Standalone dylib unexpectedly links to a tweak-hook runtime." >&2
+            exit 1
+          fi
+
+      - name: Assemble versioned ZIP
+        run: |
+          DEB_PATH="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$DEB_PATH"
+          cp "$DEB_PATH" "release/MotionSpoofer-v${MOTION_SPOOFER_VERSION}.deb"
+          cat > release/README.txt <<EOF
+          MotionSpoofer v${MOTION_SPOOFER_VERSION}
+
+          MotionSpoofer-v${MOTION_SPOOFER_VERSION}.deb
+            Jailbreak package. Includes Settings controls, app selection,
+            global HealthKit multipliers, and global motion override values.
+
+          MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib
+            Standalone sensor/overlay build for manual app injection. It omits
+            HealthKit and Pedometer hooks and does not require MobileSubstrate.
+          EOF
+          (cd release && zip -q -j "../MotionSpoofer-v${MOTION_SPOOFER_VERSION}.zip" \
+            "MotionSpoofer-v${MOTION_SPOOFER_VERSION}.deb" \
+            "MotionSpoofer-TrollFools-v${MOTION_SPOOFER_VERSION}.dylib" \
+            README.txt)
+          unzip -l "MotionSpoofer-v${MOTION_SPOOFER_VERSION}.zip"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: MotionSpoofer-deb
-          path: packages/*.deb
+          name: MotionSpoofer-v${{ env.MOTION_SPOOFER_VERSION }}
+          path: |
+            MotionSpoofer-v${{ env.MOTION_SPOOFER_VERSION }}.zip
+            release/MotionSpoofer-v${{ env.MOTION_SPOOFER_VERSION }}.deb
+            release/MotionSpoofer-TrollFools-v${{ env.MOTION_SPOOFER_VERSION }}.dylib
+          if-no-files-found: error
+          retention-days: 30
