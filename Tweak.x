@@ -1,64 +1,68 @@
 #import <Foundation/Foundation.h>
 #import <CoreMotion/CoreMotion.h>
 #import <CoreLocation/CoreLocation.h>
-#import <HealthKit/HealthKit.h>
 #import <UIKit/UIKit.h>
 #import <math.h>
+#import "TweakShared.h"
 
 #define PREF_DOMAIN @"com.yourname.motionspoofer"
 #define PREF_CHANGED "com.yourname.motionspoofer/prefsChanged"
 
 enum { S_ACCEL, S_GYRO, S_MAG, S_USERACCEL, S_GRAVITY, S_ROTRATE, S_MAGCAL, S_ATT, S_COUNT };
-enum { E_STEPS, E_DISTANCE, E_PRESSURE, E_RELALT, E_COUNT };
 
-static BOOL   gEnabled = YES;       // Global master; managed in iOS Settings.
+BOOL gEnabled = YES;                // Global master; managed in iOS Settings for the .deb build.
+BOOL gExtraEnabled[E_COUNT];
+double mSteps = 1, mDistance = 1;
 static BOOL   gAppEnabled = YES;    // Per-app sensor master; managed in the overlay.
+static BOOL   gOverrideAllPerAppModifiers = NO;
+static BOOL   gUseGlobalModifiers = YES; // Per-app opt-out from the Settings override.
 static NSString *gAppBundleID=nil;
 static BOOL   gSensorEnabled[S_COUNT];
 static BOOL   gSensorAdv[S_COUNT];
-static BOOL   gExtraEnabled[E_COUNT];
 static double gBase[S_COUNT];
 static double gAxis[S_COUNT][3];
-static double mSteps = 1, mDistance = 1, mPressure = 1, mRelAlt = 1;
+static double gGlobalBase[S_COUNT];
+static double mPressure = 1, mRelAlt = 1;
+static double gGlobalPressure = 1, gGlobalRelAlt = 1;
 static double gBtnOpacity = 0.92, gBtnSize = 54;
-static inline double M(int s, int a){ return gSensorAdv[s] ? gAxis[s][a] : gBase[s]; }
 
 static NSArray *sensorKeys(){ return @[@"accel",@"gyro",@"mag",@"userAccel",@"gravity",@"rotRate",@"magCal",@"attitude"]; }
 static NSArray *sensorLabels(){ return @[@"Accelerometer",@"Gyroscope",@"Magnetometer",@"User Acceleration",@"Gravity",@"Rotation Rate",@"Calibrated Mag",@"Attitude"]; }
+static NSArray *globalSensorKeys(){ return @[@"globalAccel",@"globalGyro",@"globalMag",@"globalUserAccel",@"globalGravity",@"globalRotRate",@"globalMagCal",@"globalAttitude"]; }
 static NSArray *axisLetters(){ return @[@"X",@"Y",@"Z"]; }
 
-static NSUserDefaults *prefsDB(){ NSUserDefaults *d=[[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN]; return d?:[NSUserDefaults standardUserDefaults]; }
+static NSUserDefaults *prefsDB(){
+#if defined(MS_TROLLFOOLS_BUILD)
+    return [NSUserDefaults standardUserDefaults]; // Persist inside the injected app's own container.
+#else
+    NSUserDefaults *d=[[NSUserDefaults alloc] initWithSuiteName:PREF_DOMAIN];
+    return d?:[NSUserDefaults standardUserDefaults];
+#endif
+}
 static double readD(id source, NSString *k, double def){ id v=[source objectForKey:k]; return v?[v doubleValue]:def; }
 static BOOL readB(id source, NSString *k, BOOL def){ id v=[source objectForKey:k]; return v?[v boolValue]:def; }
 static void refreshOverlayForCurrentApp(void);
 
+static BOOL MSUseGlobalModifiers(void){
+#if defined(MS_TROLLFOOLS_BUILD)
+    return NO;
+#else
+    return gOverrideAllPerAppModifiers && gUseGlobalModifiers;
+#endif
+}
+static inline double M(int s, int a){ return MSUseGlobalModifiers() ? gGlobalBase[s] : (gSensorAdv[s] ? gAxis[s][a] : gBase[s]); }
+
 static BOOL MSShouldShowOverlay(void){
     NSString *bundleID=NSBundle.mainBundle.bundleIdentifier;
-    if(!bundleID.length || [bundleID hasPrefix:@"com.apple."] || [bundleID isEqualToString:@"com.apple"]) return NO;
+    if(!bundleID.length) return NO;
+#if defined(MS_TROLLFOOLS_BUILD)
+    // TrollFools injects this build into the chosen app; don't require the Settings allowlist.
+    return YES;
+#else
+    if([bundleID hasPrefix:@"com.apple."] || [bundleID isEqualToString:@"com.apple"]) return NO;
     NSArray *allowed=[prefsDB() arrayForKey:@"overlayBundleIDs"];
     return [allowed containsObject:bundleID];
-}
-
-// HealthKit values are globally scaled from Settings; raw records remain unchanged.
-static HKQuantity *MSSpoofHealthQuantity(HKQuantity *quantity, HKQuantityType *type){
-    if(!quantity || !type || !gEnabled) return quantity;
-    NSString *identifier=type.identifier;
-    HKUnit *unit=nil;
-    double multiplier=1.0;
-    if([identifier isEqualToString:HKQuantityTypeIdentifierStepCount]){
-        if(!gExtraEnabled[E_STEPS]) return quantity;
-        unit=[HKUnit countUnit]; multiplier=mSteps;
-    } else if([identifier isEqualToString:HKQuantityTypeIdentifierDistanceWalkingRunning]){
-        if(!gExtraEnabled[E_DISTANCE]) return quantity;
-        unit=[HKUnit meterUnit]; multiplier=mDistance;
-    } else {
-        return quantity;
-    }
-    if(!isfinite(multiplier)) return quantity;
-    double raw=[quantity doubleValueForUnit:unit];
-    double scaled=raw*multiplier;
-    if(!isfinite(raw) || !isfinite(scaled)) return quantity;
-    return [HKQuantity quantityWithUnit:unit doubleValue:scaled];
+#endif
 }
 
 // CLHeading's component getters are used to keep compass headings consistent with
@@ -91,15 +95,23 @@ static void loadPrefs(void){
     NSDictionary *app=[allApps[gAppBundleID] isKindOfClass:[NSDictionary class]]?allApps[gAppBundleID]:nil;
     id local=app?:d; // Use legacy flat preferences as defaults when migrating existing installs.
 
+#if defined(MS_TROLLFOOLS_BUILD)
+    gEnabled=YES; // The injected build has no Settings master switch.
+    gOverrideAllPerAppModifiers=NO;
+#else
     gEnabled=readB(d,@"enabled",YES);
+    gOverrideAllPerAppModifiers=readB(d,@"overrideAllPerAppModifiers",NO);
+#endif
     gAppEnabled=readB(local,@"appEnabled",YES);
-    NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
+    gUseGlobalModifiers=readB(local,@"useGlobalModifiers",YES);
+    NSArray *keys=sensorKeys(); NSArray *ax=axisLetters(); NSArray *globalKeys=globalSensorKeys();
     for(int s=0;s<S_COUNT;s++){
         NSString *ek=[NSString stringWithFormat:@"%@Enabled",keys[s]];
         gSensorEnabled[s]=readB(local,ek,YES);
         NSString *ak=[NSString stringWithFormat:@"%@Adv",keys[s]];
         gSensorAdv[s]=readB(local,ak,NO);
         gBase[s]=readD(local,keys[s],1);
+        gGlobalBase[s]=readD(d,globalKeys[s],1);
         for(int a=0;a<3;a++) gAxis[s][a]=readD(local,[keys[s] stringByAppendingString:ax[a]],1);
     }
     gExtraEnabled[E_STEPS]=readB(d,@"stepsEnabled",YES);
@@ -108,11 +120,12 @@ static void loadPrefs(void){
     gExtraEnabled[E_RELALT]=readB(local,@"relAltEnabled",YES);
     mSteps=readD(d,@"steps",1); mDistance=readD(d,@"distance",1);
     mPressure=readD(local,@"pressure",1); mRelAlt=readD(local,@"relAlt",1);
+    gGlobalPressure=readD(d,@"globalPressure",1); gGlobalRelAlt=readD(d,@"globalRelAlt",1);
     gBtnOpacity=readD(local,@"btnOpacity",0.92); gBtnSize=readD(local,@"btnSize",54);
 }
 
-// Save only the current app's CoreMotion settings here. Global HealthKit values
-// are written by the Settings preference pane, avoiding per-app overwrites.
+// Save only the current app's CoreMotion settings here. Global sensor and HealthKit
+// multipliers are written by the Settings pane, avoiding per-app overwrites.
 static void savePrefs(void){
     NSUserDefaults *d=prefsDB();
     if(!gAppBundleID.length) gAppBundleID=NSBundle.mainBundle.bundleIdentifier?:@"unknown";
@@ -120,6 +133,7 @@ static void savePrefs(void){
     NSMutableDictionary *app=[NSMutableDictionary dictionary];
     NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
     app[@"appEnabled"]=@(gAppEnabled);
+    app[@"useGlobalModifiers"]=@(gUseGlobalModifiers);
     for(int s=0;s<S_COUNT;s++){
         app[[NSString stringWithFormat:@"%@Enabled",keys[s]]]=@(gSensorEnabled[s]);
         app[[NSString stringWithFormat:@"%@Adv",keys[s]]]=@(gSensorAdv[s]);
@@ -208,32 +222,9 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 - (double)pitch{ double v=%orig; lastPitch=v; double s=gEnabled && gAppEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,1):v; lastPitchS=s; return s; }
 - (double)yaw{ double v=%orig; lastYaw=v; double s=gEnabled && gAppEnabled && gSensorEnabled[S_ATT] ? v*M(S_ATT,2):v; lastYawS=s; return s; }
 %end
-%hook CMPedometerData
-- (NSNumber *)numberOfSteps{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_STEPS] && n) return @((long long)llround(n.doubleValue*mSteps)); return n; }
-- (NSNumber *)distance{ NSNumber *n=%orig; if(gEnabled && gExtraEnabled[E_DISTANCE] && n) return @(n.doubleValue*mDistance); return n; }
-%end
-
-// HealthKit-backed apps (including Pedometer-style apps) often read HKQuantitySample
-// values directly, while daily totals come from HKStatistics / HKStatisticsCollection.
-%hook HKQuantitySample
-- (HKQuantity *)quantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-%end
-
-%hook HKStatistics
-- (HKQuantity *)sumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)sumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)averageQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)averageQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)minimumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)minimumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)maximumQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)maximumQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)mostRecentQuantity{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-- (HKQuantity *)mostRecentQuantityForSource:(HKSource *)source{ HKQuantity *q=%orig; return MSSpoofHealthQuantity(q,self.quantityType); }
-%end
 %hook CMAltitudeData
-- (NSNumber *)relativeAltitude{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_RELALT] && n) return @(n.doubleValue*mRelAlt); return n; }
-- (NSNumber *)pressure{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_PRESSURE] && n) return @(n.doubleValue*mPressure); return n; }
+- (NSNumber *)relativeAltitude{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_RELALT] && n){ double multiplier=MSUseGlobalModifiers()?gGlobalRelAlt:mRelAlt; return @(n.doubleValue*multiplier); } return n; }
+- (NSNumber *)pressure{ NSNumber *n=%orig; if(gEnabled && gAppEnabled && gExtraEnabled[E_PRESSURE] && n){ double multiplier=MSUseGlobalModifiers()?gGlobalPressure:mPressure; return @(n.doubleValue*multiplier); } return n; }
 %end
 
 // PassThrough view to fix touch bug
@@ -258,7 +249,10 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
 @end
 
 @interface MSMotionOverlay : NSObject
-+ (instancetype)shared; - (void)installIfNeeded; - (void)reconcileVisibility; - (void)togglePanel;
++ (instancetype)shared; - (void)installIfNeeded; - (void)reconcileVisibility; - (void)togglePanel; - (void)createWindow; - (void)scheduleAutoOpenPanel;
+#if !defined(MS_TROLLFOOLS_BUILD)
+- (void)globalModifierToggle:(UISwitch *)sender; - (void)refreshGlobalModifierStatus;
+#endif
 @end
 
 @implementation MSMotionOverlay {
@@ -267,43 +261,57 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     UIButton *_floatBtn; UIView *_panelBG; UIView *_card; UIScrollView *_scroll; UIStackView *_stack;
     NSMutableDictionary *_sliders; NSMutableDictionary *_valueLabels; NSMutableDictionary *_liveLabels;
     NSMutableDictionary *_sensorHeaders; NSMutableDictionary *_absRows; NSMutableDictionary *_advContainers;
-    UISwitch *_enabledSwitch; NSTimer *_liveTimer;
+    UISwitch *_enabledSwitch;
+#if !defined(MS_TROLLFOOLS_BUILD)
+    UISwitch *_useGlobalModifiersSwitch; UILabel *_useGlobalModifiersStatus;
+#endif
+    NSTimer *_liveTimer;
+    BOOL _didAutoOpenPanel; BOOL _autoOpenScheduled;
     CGPoint _panStart;
 }
 + (instancetype)shared{ static MSMotionOverlay *s; static dispatch_once_t t; dispatch_once(&t,^{s=[MSMotionOverlay new];}); return s; }
 - (void)installIfNeeded{
     if(!MSShouldShowOverlay() || [UIApplication sharedApplication].applicationState==UIApplicationStateBackground) return;
     if(_floatWindow){
-        dispatch_async(dispatch_get_main_queue(),^{ self->_floatWindow.hidden=NO; });
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground){
+                self->_floatWindow.hidden=NO;
+                [self scheduleAutoOpenPanel];
+            }
+        });
         return;
     }
-    dispatch_async(dispatch_get_main_queue(),^{ if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground && !self->_floatWindow) [self createWindow]; });
+    dispatch_async(dispatch_get_main_queue(),^{
+        if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground && !self->_floatWindow) [self createWindow];
+        else if(MSShouldShowOverlay() && self->_floatWindow) [self scheduleAutoOpenPanel];
+    });
 }
 - (void)reconcileVisibility{
     if(MSShouldShowOverlay() && [UIApplication sharedApplication].applicationState!=UIApplicationStateBackground) [self installIfNeeded];
     else dispatch_async(dispatch_get_main_queue(),^{ self->_panelWindow.hidden=YES; self->_floatWindow.hidden=YES; });
 }
-- (UIWindow*)findWindowScene{
-    for(UIScene *sec in [UIApplication sharedApplication].connectedScenes){
-        if([sec isKindOfClass:[UIWindowScene class]]){
-            UIWindowScene *ws=(UIWindowScene*)sec;
-            UIWindow *key=nil; for(UIWindow *w in ws.windows) if(w.isKeyWindow){key=w;break;}
-            if(!key && ws.windows.count) key=ws.windows.firstObject;
-            if(key) return [[UIWindow alloc] initWithWindowScene:ws];
-        }
+- (void)scheduleAutoOpenPanel{
+    if(_didAutoOpenPanel || _autoOpenScheduled) return;
+    _autoOpenScheduled=YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.45*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        self->_autoOpenScheduled=NO;
+        if(self->_didAutoOpenPanel || !MSShouldShowOverlay() || [UIApplication sharedApplication].applicationState!=UIApplicationStateActive || !self->_panelWindow) return;
+        self->_didAutoOpenPanel=YES;
+        if(self->_panelWindow.hidden) [self togglePanel];
+    });
+}
+- (UIWindowScene*)findWindowScene{
+    UIWindowScene *fallback=nil;
+    for(UIScene *scene in [UIApplication sharedApplication].connectedScenes){
+        if(![scene isKindOfClass:[UIWindowScene class]]) continue;
+        if(scene.activationState==UISceneActivationStateForegroundActive) return (UIWindowScene*)scene;
+        if(scene.activationState==UISceneActivationStateForegroundInactive && !fallback) fallback=(UIWindowScene*)scene;
     }
-    UIWindow *w=nil;
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    w=[UIApplication sharedApplication].keyWindow;
-    #pragma clang diagnostic pop
-    if(w) return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    return fallback;
 }
 - (void)createWindow{
     if(!MSShouldShowOverlay() || [UIApplication sharedApplication].applicationState==UIApplicationStateBackground) return;
-    UIWindow *sceneWin=[self findWindowScene];
-    UIWindowScene *scene = (UIWindowScene*)sceneWin.windowScene;
+    UIWindowScene *scene=[self findWindowScene];
     CGRect floatFrame=CGRectMake(20,90,gBtnSize,gBtnSize);
     // Float window - tiny, only button area, never blocks app
     if(scene){
@@ -373,6 +381,7 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     _sensorHeaders=[NSMutableDictionary dictionary]; _absRows=[NSMutableDictionary dictionary]; _advContainers=[NSMutableDictionary dictionary];
     [self buildCard];
     _liveTimer=[NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(updateLive) userInfo:nil repeats:YES];
+    [self scheduleAutoOpenPanel];
 }
 - (void)handlePan:(UIPanGestureRecognizer*)p{
     CGPoint t=[p translationInView:_floatWindow];
@@ -506,6 +515,18 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     _enabledSwitch=[UISwitch new]; _enabledSwitch.on=gAppEnabled; [_enabledSwitch addTarget:self action:@selector(masterToggle:) forControlEvents:UIControlEventValueChanged];
     UIView *sp=[UIView new]; [sp setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [enRow addArrangedSubview:enL]; [enRow addArrangedSubview:sp]; [enRow addArrangedSubview:_enabledSwitch]; [_stack addArrangedSubview:enRow];
+#if !defined(MS_TROLLFOOLS_BUILD)
+    UIStackView *globalRow=[UIStackView new]; globalRow.axis=UILayoutConstraintAxisHorizontal; globalRow.spacing=8;
+    UILabel *globalTitle=[UILabel new]; globalTitle.text=@"Use Global Modifiers for This App"; globalTitle.font=[UIFont boldSystemFontOfSize:13];
+    UIView *globalSpacer=[UIView new]; [globalSpacer setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    _useGlobalModifiersSwitch=[UISwitch new]; _useGlobalModifiersSwitch.on=gUseGlobalModifiers;
+    [_useGlobalModifiersSwitch addTarget:self action:@selector(globalModifierToggle:) forControlEvents:UIControlEventValueChanged];
+    [globalRow addArrangedSubview:globalTitle]; [globalRow addArrangedSubview:globalSpacer]; [globalRow addArrangedSubview:_useGlobalModifiersSwitch];
+    [_stack addArrangedSubview:globalRow];
+    _useGlobalModifiersStatus=[UILabel new]; _useGlobalModifiersStatus.font=[UIFont systemFontOfSize:10]; _useGlobalModifiersStatus.textColor=[UIColor secondaryLabelColor]; _useGlobalModifiersStatus.numberOfLines=0;
+    [_stack addArrangedSubview:_useGlobalModifiersStatus];
+    [self refreshGlobalModifierStatus];
+#endif
     UIView *sep=[UIView new]; sep.backgroundColor=[UIColor separatorColor]; [sep.heightAnchor constraintEqualToConstant:1].active=YES; [_stack addArrangedSubview:sep];
     [_stack addArrangedSubview:[self section:@"PER-APP RAW SENSORS"]];
     for(int i=0;i<3;i++) [_stack addArrangedSubview:[self sensorSectionForIdx:i]];
@@ -531,6 +552,15 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
     UIButton *rm=[UIButton buttonWithType:UIButtonTypeSystem]; [rm setTitle:@"Hide floating button until next launch" forState:UIControlStateNormal]; rm.titleLabel.font=[UIFont systemFontOfSize:11]; [rm setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal]; [rm addTarget:self action:@selector(hideFloat) forControlEvents:UIControlEventTouchUpInside]; [_stack addArrangedSubview:rm];
 }
 - (void)masterToggle:(UISwitch*)s{ gAppEnabled=s.isOn; }
+#if !defined(MS_TROLLFOOLS_BUILD)
+- (void)globalModifierToggle:(UISwitch*)s{ gUseGlobalModifiers=s.isOn; [self refreshGlobalModifierStatus]; }
+- (void)refreshGlobalModifierStatus{
+    if(!_useGlobalModifiersStatus) return;
+    if(!gOverrideAllPerAppModifiers) _useGlobalModifiersStatus.text=@"Global override is off in Settings; this app is using its saved multipliers.";
+    else if(gUseGlobalModifiers) _useGlobalModifiersStatus.text=@"Global Settings multipliers are active. This app's saved values remain available when it opts out.";
+    else _useGlobalModifiersStatus.text=@"This app has opted out and is using its saved multipliers.";
+}
+#endif
 - (void)saveTap{
     gBtnOpacity=((UISlider*)_sliders[@"btnOpacity"]).value; gBtnSize=((UISlider*)_sliders[@"btnSize"]).value;
     _floatBtn.alpha=gBtnOpacity; _floatBtn.backgroundColor=[UIColor colorWithRed:0.12 green:0.65 blue:0.95 alpha:gBtnOpacity];
@@ -546,11 +576,19 @@ static double lastRollS=0,lastPitchS=0,lastYawS=0;
         for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]){ gAxis[si][a]=1; isAxis=YES; }
         if(!isAxis) [self setCur:1 key:k];
     }
-    gAppEnabled=YES; _enabledSwitch.on=YES; savePrefs();
+    gAppEnabled=YES; _enabledSwitch.on=YES;
+#if !defined(MS_TROLLFOOLS_BUILD)
+    gUseGlobalModifiers=YES; _useGlobalModifiersSwitch.on=YES; [self refreshGlobalModifierStatus];
+#endif
+    savePrefs();
 }
 - (void)hideFloat{ _floatWindow.hidden=YES; _panelWindow.hidden=YES; }
 - (void)refreshUI{
     _enabledSwitch.on=gAppEnabled;
+#if !defined(MS_TROLLFOOLS_BUILD)
+    _useGlobalModifiersSwitch.on=gUseGlobalModifiers;
+    [self refreshGlobalModifierStatus];
+#endif
     for(NSString *k in _sliders.allKeys){
         float v=[self cur:k]; NSArray *keys=sensorKeys(); NSArray *ax=axisLetters();
         for(int si=0;si<S_COUNT;si++) for(int a=0;a<3;a++) if([[keys[si] stringByAppendingString:ax[a]] isEqualToString:k]) v=(float)gAxis[si][a];

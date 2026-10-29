@@ -1,8 +1,8 @@
 Package: com.yourname.motionspoofer
 Name: MotionSpoofer V3
-Version: 1.4.1
+Version: 1.5.0
 Architecture: iphoneos-arm
-Description: Per-app motion sensor controls with configurable overlay and global HealthKit step/distance multipliers in Settings.
+Description: Per-app motion controls, Settings app selection, global sensor overrides, and HealthKit multipliers.
 Maintainer: you
 Author: you
 Section: Tweaks
