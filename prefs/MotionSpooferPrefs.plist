@@ -1,0 +1,9 @@
+{
+    entry = {
+        bundle = MotionSpooferPrefs;
+        cell = PSLinkCell;
+        detail = MSRootListController;
+        isController = 1;
+        label = MotionSpoofer;
+    };
+}
